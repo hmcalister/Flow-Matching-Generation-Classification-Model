@@ -137,7 +137,7 @@ def create_and_save_images(filepath: str):
     _joint_distribution_loader = JointDistributionLoader(_mnist_loader)
     _data = next(iter(_joint_distribution_loader))
     x0_samples = _data["x0_samples"].to(TORCH_DEVICE)
-    # x1_samples = _data["x1_samples"].to(TORCH_DEVICE)
+    x1_samples = _data["x1_samples"].to(TORCH_DEVICE)
     y0_samples = _data["y0_samples"].to(TORCH_DEVICE)
     y1_samples = _data["y1_samples"].to(TORCH_DEVICE)
 
