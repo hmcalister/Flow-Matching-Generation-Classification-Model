@@ -35,7 +35,7 @@ class JointDistributionLoader(BaseDataLoader):
 
             # First half of batch is (noise, label) -> (image, label)
             # Second half of batch is (image, noise) -> (image, label)
-            x0_samples[:half_batch_size, :] = x1_samples[:half_batch_size]
+            x0_samples[half_batch_size:, :] = x1_samples[half_batch_size:]
             y0_samples = torch.randn_like(y1_samples)
             y0_samples[:half_batch_size, :] = y1_samples[:half_batch_size]
 
