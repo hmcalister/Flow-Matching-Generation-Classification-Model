@@ -21,7 +21,7 @@ IMAGE_SHAPE: tuple[int, int, int] = (1, 28, 28)
 IMAGE_DIMENSION = int(torch.prod(torch.tensor(IMAGE_SHAPE)).item())
 NUM_CLASSES = 10
 
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-4
 FLOW_MATCHING_NUM_EPOCHS = 128
 
@@ -30,11 +30,11 @@ EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
 joint_distribution_loader = JointDistributionLoader(
-    load_MNIST(batch_size=BATCH_SIZE, num_samples=1_000, preload=True, train=True)
+    load_MNIST(batch_size=BATCH_SIZE, num_samples=60_000, preload=True, train=True)
 )
 
 joint_distribution_validation_loader = JointDistributionLoader(
-    load_MNIST(batch_size=10 * BATCH_SIZE, num_samples=1_000, preload=True, train=False)
+    load_MNIST(batch_size=BATCH_SIZE, num_samples=10_000, preload=True, train=False)
 )
 
 # --------------------------------------------------------------------------------
@@ -49,13 +49,22 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
     image_component = mean_square_error_loss(
         x_pred[:, :IMAGE_DIMENSION], x_true[:, :IMAGE_DIMENSION]
     )
-    label_component = cross_entropy_loss(
+    label_component = mean_square_error_loss(
         x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
         x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
     )
-
     loss = image_component + 0.1 * label_component
     return loss
+
+    # image_component = mean_square_error_loss(
+    #     x_pred[:, :IMAGE_DIMENSION], x_true[:, :IMAGE_DIMENSION]
+    # )
+    # label_component = cross_entropy_loss(
+    #     x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES].softmax(dim=1),
+    #     x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
+    # )
+    # loss = image_component + 0.1 * label_component
+    # return loss
 
 
 # --------------------------------------------------------------------------------
@@ -133,16 +142,18 @@ def create_and_save_images(filepath: str):
     y1_samples = _data["y1_samples"].to(TORCH_DEVICE)
 
     X = torch.cat([x0_samples, y0_samples], dim=1)
+    X1 = torch.cat([x1_samples, y1_samples], dim=1)
+    velocity_mask = (X1 != X).float()
     t_steps = torch.linspace(0, 1, ODE_NUM_TIME_STEPS).to(TORCH_DEVICE)
 
     for index in range(ODE_NUM_TIME_STEPS):
         t = t_steps[index] * torch.ones((2 * NUM_IMAGES,), device=TORCH_DEVICE)
-        v = velocity_field_model.forward(t, X)
+        v = velocity_field_model.forward(t, X) * velocity_mask
         X = X + (1 / ODE_NUM_TIME_STEPS) * v
 
     pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
     pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1)
-    pushforward_class_confidence = X[:, IMAGE_DIMENSION:].softmax(dim=1)
+    pushforward_class_confidence = X[:, IMAGE_DIMENSION:]
     pushforward_true_classes = y1_samples.argmax(dim=1)
 
     fig, axes = plt.subplots(
@@ -214,6 +225,7 @@ for epoch_index in epoch_progress_bar:
 
         X0 = torch.cat([x0_samples, y0_samples], dim=1)
         X1 = torch.cat([x1_samples, y1_samples], dim=1)
+        velocity_mask = (X1 != X0).float()
         effective_batch_size = X0.shape[0]
         t = torch.rand(effective_batch_size, device=TORCH_DEVICE)
 
@@ -221,7 +233,9 @@ for epoch_index in epoch_progress_bar:
         expected_velocity = X1 - X0
 
         predicted_velocity = velocity_field_model(t, X_t)
-        batch_loss = loss_fn(predicted_velocity, expected_velocity)
+        batch_loss = loss_fn(
+            predicted_velocity * velocity_mask, expected_velocity * velocity_mask
+        )
         batch_loss.backward()
 
         torch.nn.utils.clip_grad_norm_(velocity_field_model.parameters(), max_norm=1.0)
@@ -264,6 +278,8 @@ for epoch_index in epoch_progress_bar:
 
             X0 = torch.cat([x0_samples, y0_samples], dim=1)
             X1 = torch.cat([x1_samples, y1_samples], dim=1)
+            velocity_mask = (X1 != X0).float()
+
             expected_velocity = X1 - X0
 
             X = X0
@@ -274,7 +290,7 @@ for epoch_index in epoch_progress_bar:
                 t = t_steps[index] * torch.ones(
                     (effective_batch_size,), device=TORCH_DEVICE
                 )
-                v = velocity_field_model(t, X)
+                v = velocity_field_model(t, X) * velocity_mask
                 X = X + (1 / ODE_NUM_TIME_STEPS) * v
 
                 batch_loss += loss_fn(v, expected_velocity).item()
@@ -282,7 +298,7 @@ for epoch_index in epoch_progress_bar:
 
             pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
             pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1).float()
-            pushforward_class_confidence = X[:, IMAGE_DIMENSION:].softmax(dim=1)
+            pushforward_class_confidence = X[:, IMAGE_DIMENSION:]
             pushforward_true_classes = y1_samples.argmax(dim=1).float()
 
             epoch_validation_loss += batch_loss
@@ -291,8 +307,8 @@ for epoch_index in epoch_progress_bar:
                 .type(torch.float)
                 .mean()
             )
-            epoch_validation_cross_entropy += torch.nn.functional.cross_entropy(
-                pushforward_classes, pushforward_true_classes
+            epoch_validation_cross_entropy += cross_entropy_loss(
+                pushforward_class_confidence, y1_samples
             )
 
         history["validation_loss"].append(
@@ -301,7 +317,7 @@ for epoch_index in epoch_progress_bar:
         history["validation_classification_accuracy"].append(
             epoch_validation_accuracy.item() / len(joint_distribution_validation_loader)
         )
-        history["epoch_validation_cross_entropy"].append(
+        history["validation_cross_entropy"].append(
             epoch_validation_cross_entropy.item()
             / len(joint_distribution_validation_loader)
         )
@@ -314,7 +330,7 @@ for epoch_index in epoch_progress_bar:
             torch.save(velocity_field_model.state_dict(), f)
         with open("models/experiment_00/history.csv", "w") as f:
             df = pd.DataFrame(history)
-            df.to_csv(f)
+            df.to_csv(f, index=False)
     if epoch_index % EPOCH_GENERATE_PERIOD == 0:
         create_and_save_images(
             f"figures/experiment_00/augmentation_{epoch_index:05d}.png"
