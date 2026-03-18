@@ -54,7 +54,7 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
         x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
     )
 
-    loss = image_component + 0.0 * label_component
+    loss = image_component + 0.1 * label_component
     return loss
 
 
