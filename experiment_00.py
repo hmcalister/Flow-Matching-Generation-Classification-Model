@@ -30,11 +30,11 @@ EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
 joint_distribution_loader = JointDistributionLoader(
-    load_MNIST(batch_size=BATCH_SIZE, num_samples=60_000, preload=True, train=True)
+    load_MNIST(batch_size=BATCH_SIZE, num_samples=20_000, preload=True, train=True)
 )
 
 joint_distribution_validation_loader = JointDistributionLoader(
-    load_MNIST(batch_size=BATCH_SIZE, num_samples=10_000, preload=True, train=False)
+    load_MNIST(batch_size=BATCH_SIZE, num_samples=2_500, preload=True, train=False)
 )
 
 # --------------------------------------------------------------------------------
@@ -339,3 +339,6 @@ for epoch_index in epoch_progress_bar:
 
 with open("models/experiment_00/augmentation_model.model", "wb") as f:
     torch.save(velocity_field_model.state_dict(), f)
+with open("models/experiment_00/history.csv", "w") as f:
+    df = pd.DataFrame(history)
+    df.to_csv(f, index=False)
