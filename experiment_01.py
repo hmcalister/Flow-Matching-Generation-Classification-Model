@@ -26,6 +26,7 @@ FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-4
 FLOW_MATCHING_NUM_EPOCHS = 128
 
 ODE_NUM_TIME_STEPS = 16
+VELOCITY_MASK = True
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
@@ -152,7 +153,8 @@ def create_and_save_images(filepath: str):
     X = torch.cat([x0_samples, y0_samples], dim=1)
     X1 = torch.cat([x1_samples, y1_samples], dim=1)
     velocity_mask = (X1 != X).float()
-    # velocity_mask = torch.ones_like(velocity_mask)
+    if not VELOCITY_MASK:
+        velocity_mask = torch.ones_like(velocity_mask)
     t_steps = torch.linspace(0, 1, ODE_NUM_TIME_STEPS).to(TORCH_DEVICE)
 
     for index in range(ODE_NUM_TIME_STEPS):
@@ -252,7 +254,8 @@ for epoch_index in epoch_progress_bar:
         X0 = torch.cat([x0_samples, y0_samples], dim=1)
         X1 = torch.cat([x1_samples, y1_samples], dim=1)
         velocity_mask = (X1 != X0).float()
-        # velocity_mask = torch.ones_like(velocity_mask)
+        if not VELOCITY_MASK:
+            velocity_mask = torch.ones_like(velocity_mask)
         effective_batch_size = X0.shape[0]
         t = torch.rand(effective_batch_size, device=TORCH_DEVICE)
 
@@ -306,7 +309,8 @@ for epoch_index in epoch_progress_bar:
             X0 = torch.cat([x0_samples, y0_samples], dim=1)
             X1 = torch.cat([x1_samples, y1_samples], dim=1)
             velocity_mask = (X1 != X0).float()
-            # velocity_mask = torch.ones_like(velocity_mask)
+            if not VELOCITY_MASK:
+                velocity_mask = torch.ones_like(velocity_mask)
 
             expected_velocity = X1 - X0
 
