@@ -22,15 +22,15 @@ IMAGE_DIMENSION = int(torch.prod(torch.tensor(IMAGE_SHAPE)).item())
 NUM_CLASSES = 10
 
 BATCH_SIZE = 256
-FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-4
+FLOW_MATCHING_INITIAL_LEARNING_RATE = 1e-4
 FLOW_MATCHING_NUM_EPOCHS = 128
 
 ODE_NUM_TIME_STEPS = 16
-VELOCITY_MASK = True
+VELOCITY_MASK = False
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
-occluded_image_loader = JointDistributionLoader(
+joint_distribution_loader = JointDistributionLoader(
     load_MNIST(batch_size=BATCH_SIZE, num_samples=60_000, preload=True, train=True)
 )
 
@@ -236,8 +236,8 @@ for epoch_index in epoch_progress_bar:
     velocity_field_model.train()
     epoch_loss = torch.zeros(1, device=TORCH_DEVICE)
     batch_progress_bar = tqdm(
-        occluded_image_loader,
-        total=len(occluded_image_loader),
+        joint_distribution_loader,
+        total=len(joint_distribution_loader),
         desc="Batch",
         leave=False,
         disable=not ENABLE_PROGRESS_BAR,
@@ -277,7 +277,7 @@ for epoch_index in epoch_progress_bar:
                 "Loss": f"{batch_loss.item():4E}",
             }
         )
-    epoch_loss = (epoch_loss / len(occluded_image_loader)).item()
+    epoch_loss = (epoch_loss / len(joint_distribution_loader)).item()
     epoch_progress_bar.set_postfix(
         {
             "Epoch Loss": f"{epoch_loss:.4E}",
