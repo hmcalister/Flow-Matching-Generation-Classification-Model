@@ -30,11 +30,11 @@ EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
 joint_distribution_loader = JointDistributionLoader(
-    load_MNIST(batch_size=BATCH_SIZE, num_samples=20_000, preload=True, train=True)
+    load_MNIST(batch_size=BATCH_SIZE, num_samples=60_000, preload=True, train=True)
 )
 
 joint_distribution_validation_loader = JointDistributionLoader(
-    load_MNIST(batch_size=BATCH_SIZE, num_samples=2_500, preload=True, train=False)
+    load_MNIST(batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=False)
 )
 
 # --------------------------------------------------------------------------------
@@ -53,7 +53,7 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
         x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
         x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
     )
-    loss = image_component + 0.1 * label_component
+    loss = image_component + 0.01 * IMAGE_DIMENSION / NUM_CLASSES * label_component
     return loss
 
     # image_component = mean_square_error_loss(
@@ -144,6 +144,7 @@ def create_and_save_images(filepath: str):
     X = torch.cat([x0_samples, y0_samples], dim=1)
     X1 = torch.cat([x1_samples, y1_samples], dim=1)
     velocity_mask = (X1 != X).float()
+    velocity_mask = torch.ones_like(velocity_mask)
     t_steps = torch.linspace(0, 1, ODE_NUM_TIME_STEPS).to(TORCH_DEVICE)
 
     for index in range(ODE_NUM_TIME_STEPS):
@@ -226,6 +227,7 @@ for epoch_index in epoch_progress_bar:
         X0 = torch.cat([x0_samples, y0_samples], dim=1)
         X1 = torch.cat([x1_samples, y1_samples], dim=1)
         velocity_mask = (X1 != X0).float()
+        velocity_mask = torch.ones_like(velocity_mask)
         effective_batch_size = X0.shape[0]
         t = torch.rand(effective_batch_size, device=TORCH_DEVICE)
 
@@ -279,13 +281,14 @@ for epoch_index in epoch_progress_bar:
             X0 = torch.cat([x0_samples, y0_samples], dim=1)
             X1 = torch.cat([x1_samples, y1_samples], dim=1)
             velocity_mask = (X1 != X0).float()
+            velocity_mask = torch.ones_like(velocity_mask)
 
             expected_velocity = X1 - X0
 
             X = X0
             effective_batch_size = X.shape[0]
             t_steps = torch.linspace(0, 1, ODE_NUM_TIME_STEPS).to(TORCH_DEVICE)
-            batch_loss = 0.0
+            batch_loss = torch.zeros(1, device=TORCH_DEVICE)
             for index in range(ODE_NUM_TIME_STEPS):
                 t = t_steps[index] * torch.ones(
                     (effective_batch_size,), device=TORCH_DEVICE
@@ -293,7 +296,7 @@ for epoch_index in epoch_progress_bar:
                 v = velocity_field_model(t, X) * velocity_mask
                 X = X + (1 / ODE_NUM_TIME_STEPS) * v
 
-                batch_loss += loss_fn(v, expected_velocity).item()
+                batch_loss += loss_fn(v, expected_velocity)
             batch_loss /= ODE_NUM_TIME_STEPS
 
             pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
@@ -311,15 +314,13 @@ for epoch_index in epoch_progress_bar:
                 pushforward_class_confidence, y1_samples
             )
 
-        history["validation_loss"].append(
-            epoch_validation_loss.item() / len(joint_distribution_validation_loader)
-        )
+        num_items = len(joint_distribution_validation_loader)
+        history["validation_loss"].append(epoch_validation_loss.item() / num_items)
         history["validation_classification_accuracy"].append(
-            epoch_validation_accuracy.item() / len(joint_distribution_validation_loader)
+            epoch_validation_accuracy.item() / num_items
         )
         history["validation_cross_entropy"].append(
-            epoch_validation_cross_entropy.item()
-            / len(joint_distribution_validation_loader)
+            epoch_validation_cross_entropy.item() / num_items
         )
 
     lr_scheduler.step()
