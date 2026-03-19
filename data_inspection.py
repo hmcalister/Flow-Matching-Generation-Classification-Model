@@ -6,7 +6,7 @@ import pandas as pd
 
 # %% History Inspection
 
-df = pd.read_csv("models/experiment_01/history.csv")
+df = pd.read_csv("models/experiment_02/history.csv")
 t = np.arange(len(df))
 
 plt.figure(figsize=(10, 6))
