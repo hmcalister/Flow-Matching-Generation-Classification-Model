@@ -47,6 +47,57 @@ class JointDistributionLoader(BaseDataLoader):
             yield data
 
 
+class OccludedImageLoader:
+    def __init__(
+        self,
+        base_loader: JointDistributionLoader,
+        image_shape: tuple[int, int, int],
+        p_occlusion: float = 0.5,
+        occlusion_scale_range: tuple[float, float] = (0.05, 0.33),
+        occlusion_aspect_ratio_range: tuple[float, float] = (0.75, 1.5),
+    ):
+        self.base_loader = base_loader
+        self.image_shape = image_shape
+        self.random_erasing = transforms.RandomErasing(
+            p=p_occlusion,
+            scale=occlusion_scale_range,
+            ratio=occlusion_aspect_ratio_range,
+            value="random",  # pyright: ignore[reportArgumentType]
+        )
+
+    def __len__(self) -> int:
+        return len(self.base_loader)
+
+    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
+        for data in self.base_loader:
+            x0_samples = data["x0_samples"]
+            x1_samples = data["x1_samples"]
+            y0_samples = data["y0_samples"]
+            y1_samples = data["y1_samples"]
+
+            image_to_image_mask = (x0_samples == x1_samples).all(dim=1)
+            image_to_image_images = x0_samples[image_to_image_mask]
+
+            # occluded_images = self.random_erasing(
+            #     image_to_image_images.view(-1, *self.image_shape)
+            # ).view(image_to_image_images.shape[0], -1)
+            occluded_list = [
+                self.random_erasing(img.view(*self.image_shape))
+                for img in image_to_image_images
+            ]
+            occluded_images = torch.stack(occluded_list).view(
+                image_to_image_images.shape[0], -1
+            )
+            x0_samples[image_to_image_mask] = occluded_images
+            data["x0_samples"] = x0_samples
+
+            # Occluded images get their labels back
+            occluded_image_mask = (x0_samples != x1_samples).any(dim=1)
+            y0_samples[occluded_image_mask] = y1_samples[occluded_image_mask]
+
+            yield data
+
+
 def load_MNIST(
     batch_size: int,
     num_samples: int = 60_000,
