@@ -182,3 +182,79 @@ def load_MNIST(
     return MNISTDataLoader()
 
 
+def load_CIFAR10(
+    batch_size: int,
+    num_samples: int = 50_000,
+    preload: bool = False,
+    train: bool = True,
+    shuffle: bool = True,
+) -> BaseImageDataLoader:
+    """
+    Load, transform, and return the CIFAR10 dataset as a DataLoader.
+    MNIST has a shape (3, 32, 32).
+
+    :param preload:
+        If True, load all samples into a TensorDataset in one pass at startup.
+        This avoids repeated per-sample transform and CPU->GPU transfer overhead
+        during training. Recommended when the dataset fits in memory.
+
+    :returns:
+        A DataLoader yielding dict[str, torch.Tensor]
+        Dictionary keys are ["p0_samples", "p1_samples", "class_labels",]
+    """
+
+    transform = transforms.Compose(
+        [
+            transforms.ToImage(),
+            transforms.ToDtype(torch.float32, scale=True),
+            transforms.Normalize((0.0,), (1.0,)),
+            transforms.Lambda(lambda x: x.flatten()),
+        ]
+    )
+    dataset = torchvision.datasets.CIFAR10(
+        "datasets/CIFAR10", download=True, transform=transform, train=train
+    )
+    if num_samples < len(dataset):
+        dataset = torch.utils.data.Subset(dataset, range(num_samples))
+
+    if preload:
+        _loader = DataLoader(dataset, batch_size=num_samples, shuffle=shuffle)
+        samples, labels = next(iter(_loader))
+        dataset = torch.utils.data.TensorDataset(samples, labels)
+
+    torch_loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+    class CIFAR10DataLoader(BaseImageDataLoader):
+        IMAGE_SHAPE: tuple[int, int, int] = (3, 32, 32)
+        DATA_DIMENSION = int(torch.prod(torch.tensor(IMAGE_SHAPE)).item())
+        BATCH_SIZE = batch_size
+
+        CLASS_LABELS = [
+            "AIRPLANE",
+            "AUTOMOBILE",
+            "BIRD",
+            "CAT",
+            "DEER",
+            "DOG",
+            "FROG",
+            "HORSE",
+            "SHIP",
+            "TRUCK",
+        ]
+
+        def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
+            for images, image_labels in torch_loader:
+                prior_samples = torch.randn_like(images)
+                image_labels = torch.nn.functional.one_hot(
+                    image_labels, num_classes=len(self.CLASS_LABELS)
+                ).float()
+                yield {
+                    "p0_samples": prior_samples,
+                    "p1_samples": images,
+                    "class_labels": image_labels,
+                }
+
+        def __len__(self) -> int:
+            return len(torch_loader)
+
+    return CIFAR10DataLoader()
