@@ -90,21 +90,11 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
         x_pred[:, :IMAGE_DIMENSION], x_true[:, :IMAGE_DIMENSION]
     )
     label_component = mean_square_error_loss(
-        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
-        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
+        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES] / x_true.amax(),
+        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES] / x_true.amax(),
     )
     loss = image_component + 0.01 * IMAGE_DIMENSION / NUM_CLASSES * label_component
     return loss
-
-    # image_component = mean_square_error_loss(
-    #     x_pred[:, :IMAGE_DIMENSION], x_true[:, :IMAGE_DIMENSION]
-    # )
-    # label_component = cross_entropy_loss(
-    #     x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES].softmax(dim=1),
-    #     x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES],
-    # )
-    # loss = image_component + 0.1 * label_component
-    # return loss
 
 
 # --------------------------------------------------------------------------------
@@ -115,8 +105,8 @@ class VelocityFieldModel(torch.nn.Module):
     EMBEDDING_DIMENSIONS = (256,)
     MODEL_BASE_CHANNELS = 64
     NUM_RES_BLOCKS = 2
-    ATTENTION_RESOLUTIONS: tuple[int, ...] = (1,)
-    CHANNEL_MULT: tuple[int, ...] = (1, 2, 4)
+    ATTENTION_RESOLUTIONS: tuple[int, ...] = (2, 4)
+    CHANNEL_MULT: tuple[int, ...] = (1, 2, 2, 4)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -197,7 +187,9 @@ def create_and_save_images(filepath: str | Path):
 
     pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
     pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1)
-    pushforward_class_confidence = X[:, IMAGE_DIMENSION:]
+    pushforward_class_confidence = torch.nn.functional.softmax(
+        5 * X[:, IMAGE_DIMENSION:], dim=1
+    )
     pushforward_true_classes = y1_samples.argmax(dim=1)
 
     fig, axes = plt.subplots(
@@ -368,7 +360,9 @@ for epoch_index in epoch_progress_bar:
 
             pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
             pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1).float()
-            pushforward_class_confidence = X[:, IMAGE_DIMENSION:]
+            pushforward_class_confidence = torch.nn.functional.softmax(
+                5 * X[:, IMAGE_DIMENSION:], dim=1
+            )
             pushforward_true_classes = y1_samples.argmax(dim=1).float()
 
             epoch_validation_loss += batch_loss
