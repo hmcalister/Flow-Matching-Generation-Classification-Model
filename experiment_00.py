@@ -1,5 +1,6 @@
 import os
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -7,21 +8,14 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from datasets import JointDistributionLoader, load_MNIST
+from datasets import JointDistributionLoader, load_CIFAR10, load_MNIST
 from velocity_field_model import MetaUNetModel
 
-if not os.path.exists("models/experiment_00"):
-    os.makedirs("models/experiment_00")
-if not os.path.exists("figures/experiment_00"):
-    os.makedirs("figures/experiment_00")
-
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-ENABLE_PROGRESS_BAR = True
-IMAGE_SHAPE: tuple[int, int, int] = (1, 28, 28)
-IMAGE_DIMENSION = int(torch.prod(torch.tensor(IMAGE_SHAPE)).item())
-NUM_CLASSES = 10
+DATASET = "CIFAR10"
+VELOCITY_MASK = True
 
-BATCH_SIZE = 256
+BATCH_SIZE = 64
 FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-4
 FLOW_MATCHING_NUM_EPOCHS = 128
 
@@ -29,13 +23,49 @@ ODE_NUM_TIME_STEPS = 16
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
+ENABLE_PROGRESS_BAR = True
+
+# --------------------------------------------------------------------------------
+
+DATASET = DATASET.upper()
+EXPERIMENT_DIR = "experiment_00_mask" if VELOCITY_MASK else "experiment_00_nomask"
+MODELS_DIR = Path("models").joinpath(DATASET).joinpath(EXPERIMENT_DIR)
+FIGURES_DIR = Path("figures").joinpath(DATASET).joinpath(EXPERIMENT_DIR)
+
+if not os.path.exists(MODELS_DIR):
+    os.makedirs(MODELS_DIR)
+if not os.path.exists(FIGURES_DIR):
+    os.makedirs(FIGURES_DIR)
+
+if DATASET == "MNIST":
+    base_dataset_loader_method = load_MNIST
+elif DATASET == "CIFAR10":
+    base_dataset_loader_method = load_CIFAR10
+else:
+    print("DATASET NOT IDENTIFIED")
+    exit()
+
+_base_dataset_loader = base_dataset_loader_method(
+    batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=True
+)
+IMAGE_SHAPE: tuple[int, int, int] = _base_dataset_loader.IMAGE_SHAPE
+IMAGE_DIMENSION = _base_dataset_loader.DATA_DIMENSION
+CLASS_LABELS = _base_dataset_loader.CLASS_LABELS
+NUM_CLASSES = len(_base_dataset_loader.CLASS_LABELS)
+del _base_dataset_loader
+
 joint_distribution_loader = JointDistributionLoader(
-    load_MNIST(batch_size=BATCH_SIZE, num_samples=60_000, preload=True, train=True)
+    base_dataset_loader_method(
+        batch_size=BATCH_SIZE, num_samples=50_000, preload=True, train=True
+    )
 )
 
 joint_distribution_validation_loader = JointDistributionLoader(
-    load_MNIST(batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=False)
+    base_dataset_loader_method(
+        batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=False
+    )
 )
+
 
 # --------------------------------------------------------------------------------
 
@@ -123,18 +153,18 @@ torch.compile(velocity_field_model)
 
 
 @torch.no_grad()
-def create_and_save_images(filepath: str):
+def create_and_save_images(filepath: str | Path):
     # Images per row, i.e. num to generate and num to classify
     NUM_IMAGES = 10
     AX_SIZE = 3
 
-    _mnist_loader = load_MNIST(
+    _dataset_loader = base_dataset_loader_method(
         batch_size=2 * NUM_IMAGES,
         num_samples=2 * NUM_IMAGES,
         train=False,
         shuffle=False,
     )
-    _joint_distribution_loader = JointDistributionLoader(_mnist_loader)
+    _joint_distribution_loader = JointDistributionLoader(_dataset_loader)
     _data = next(iter(_joint_distribution_loader))
     x0_samples = _data["x0_samples"].to(TORCH_DEVICE)
     x1_samples = _data["x1_samples"].to(TORCH_DEVICE)
@@ -144,7 +174,8 @@ def create_and_save_images(filepath: str):
     X = torch.cat([x0_samples, y0_samples], dim=1)
     X1 = torch.cat([x1_samples, y1_samples], dim=1)
     velocity_mask = (X1 != X).float()
-    velocity_mask = torch.ones_like(velocity_mask)
+    if not VELOCITY_MASK:
+        velocity_mask = torch.ones_like(velocity_mask)
     t_steps = torch.linspace(0, 1, ODE_NUM_TIME_STEPS).to(TORCH_DEVICE)
 
     for index in range(ODE_NUM_TIME_STEPS):
@@ -163,12 +194,15 @@ def create_and_save_images(filepath: str):
         figsize=(AX_SIZE * NUM_IMAGES, AX_SIZE * 2),
     )
 
-    C, H, W = IMAGE_SHAPE
     for image_index, ax in enumerate(axes.ravel()):
         ax.set_axis_off()
 
         generated_image = (
-            pushforward_images[image_index].cpu().clamp(0, 1).view((H, W, C))
+            pushforward_images[image_index]
+            .cpu()
+            .clamp(0, 1)
+            .view(IMAGE_SHAPE)
+            .permute(1, 2, 0)
         )
         predicted_label = pushforward_classes[image_index]
         predicted_label_confidence = pushforward_class_confidence[
@@ -176,11 +210,11 @@ def create_and_save_images(filepath: str):
         ].item()
         true_label = pushforward_true_classes[image_index]
         ax.set_title(
-            f"Predicted Label: {predicted_label} ({predicted_label_confidence:.4f})\nTrue Label: {true_label}"
+            f"Predicted Label: {CLASS_LABELS[predicted_label]} ({predicted_label_confidence:.4f})\nTrue Label: {CLASS_LABELS[true_label]}"
         )
         ax.imshow(
             generated_image,
-            cmap="gray",
+            cmap="gray",  # Ignored for color images
         )
 
     fig.tight_layout()
@@ -227,7 +261,8 @@ for epoch_index in epoch_progress_bar:
         X0 = torch.cat([x0_samples, y0_samples], dim=1)
         X1 = torch.cat([x1_samples, y1_samples], dim=1)
         velocity_mask = (X1 != X0).float()
-        velocity_mask = torch.ones_like(velocity_mask)
+        if not VELOCITY_MASK:
+            velocity_mask = torch.ones_like(velocity_mask)
         effective_batch_size = X0.shape[0]
         t = torch.rand(effective_batch_size, device=TORCH_DEVICE)
 
@@ -281,7 +316,8 @@ for epoch_index in epoch_progress_bar:
             X0 = torch.cat([x0_samples, y0_samples], dim=1)
             X1 = torch.cat([x1_samples, y1_samples], dim=1)
             velocity_mask = (X1 != X0).float()
-            velocity_mask = torch.ones_like(velocity_mask)
+            if not VELOCITY_MASK:
+                velocity_mask = torch.ones_like(velocity_mask)
 
             expected_velocity = X1 - X0
 
@@ -326,20 +362,20 @@ for epoch_index in epoch_progress_bar:
     lr_scheduler.step()
     if epoch_index % EPOCH_SAVE_PERIOD == 0:
         with open(
-            f"models/experiment_00/augmentation_model.chk_{epoch_index:05d}", "wb"
+            MODELS_DIR.joinpath(f"augmentation_model.chk_{epoch_index:05d}"), "wb"
         ) as f:
             torch.save(velocity_field_model.state_dict(), f)
-        with open("models/experiment_00/history.csv", "w") as f:
+        with open(MODELS_DIR.joinpath("history.csv"), "w") as f:
             df = pd.DataFrame(history)
             df.to_csv(f, index=False)
     if epoch_index % EPOCH_GENERATE_PERIOD == 0:
         create_and_save_images(
-            f"figures/experiment_00/augmentation_{epoch_index:05d}.png"
+            FIGURES_DIR.joinpath(f"augmentation_{epoch_index:05d}.png")
         )
 
 
-with open("models/experiment_00/augmentation_model.model", "wb") as f:
+with open(MODELS_DIR.joinpath("augmentation_model.model"), "wb") as f:
     torch.save(velocity_field_model.state_dict(), f)
-with open("models/experiment_00/history.csv", "w") as f:
+with open(MODELS_DIR.joinpath("history.csv"), "w") as f:
     df = pd.DataFrame(history)
     df.to_csv(f, index=False)

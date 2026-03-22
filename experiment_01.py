@@ -1,5 +1,6 @@
 import os
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -7,39 +8,71 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from datasets import JointDistributionLoader, OccludedImageLoader, load_MNIST
+from datasets import (
+    JointDistributionLoader,
+    OccludedImageLoader,
+    load_CIFAR10,
+    load_MNIST,
+)
 from velocity_field_model import MetaUNetModel
 
-if not os.path.exists("models/experiment_01"):
-    os.makedirs("models/experiment_01")
-if not os.path.exists("figures/experiment_01"):
-    os.makedirs("figures/experiment_01")
-
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-ENABLE_PROGRESS_BAR = True
-IMAGE_SHAPE: tuple[int, int, int] = (1, 28, 28)
-IMAGE_DIMENSION = int(torch.prod(torch.tensor(IMAGE_SHAPE)).item())
-NUM_CLASSES = 10
+DATASET = "CIFAR10"
+VELOCITY_MASK = True
 
-BATCH_SIZE = 256
-FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-4
+BATCH_SIZE = 64
+FLOW_MATCHING_INITIAL_LEARNING_RATE = 1e-4
 FLOW_MATCHING_NUM_EPOCHS = 128
 
 ODE_NUM_TIME_STEPS = 16
-VELOCITY_MASK = True
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
+ENABLE_PROGRESS_BAR = True
+
+# --------------------------------------------------------------------------------
+
+DATASET = DATASET.upper()
+EXPERIMENT_DIR = "experiment_01_mask" if VELOCITY_MASK else "experiment_01_nomask"
+MODELS_DIR = Path("models").joinpath(DATASET).joinpath(EXPERIMENT_DIR)
+FIGURES_DIR = Path("figures").joinpath(DATASET).joinpath(EXPERIMENT_DIR)
+
+if not os.path.exists(MODELS_DIR):
+    os.makedirs(MODELS_DIR)
+if not os.path.exists(FIGURES_DIR):
+    os.makedirs(FIGURES_DIR)
+
+if DATASET == "MNIST":
+    base_dataset_loader_method = load_MNIST
+elif DATASET == "CIFAR10":
+    base_dataset_loader_method = load_CIFAR10
+else:
+    print("DATASET NOT IDENTIFIED")
+    exit()
+
+_base_dataset_loader = base_dataset_loader_method(
+    batch_size=BATCH_SIZE, num_samples=BATCH_SIZE, preload=True, train=True
+)
+IMAGE_SHAPE: tuple[int, int, int] = _base_dataset_loader.IMAGE_SHAPE
+IMAGE_DIMENSION = _base_dataset_loader.DATA_DIMENSION
+CLASS_LABELS = _base_dataset_loader.CLASS_LABELS
+NUM_CLASSES = len(_base_dataset_loader.CLASS_LABELS)
+del _base_dataset_loader
+
 occluded_image_loader = OccludedImageLoader(
     JointDistributionLoader(
-        load_MNIST(batch_size=BATCH_SIZE, num_samples=60_000, preload=True, train=True)
+        base_dataset_loader_method(
+            batch_size=BATCH_SIZE, num_samples=50_000, preload=True, train=True
+        )
     ),
     image_shape=IMAGE_SHAPE,
 )
 
 occluded_image_validation_loader = OccludedImageLoader(
     JointDistributionLoader(
-        load_MNIST(batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=False)
+        base_dataset_loader_method(
+            batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=False
+        )
     ),
     image_shape=IMAGE_SHAPE,
 )
@@ -130,21 +163,21 @@ torch.compile(velocity_field_model)
 
 
 @torch.no_grad()
-def create_and_save_images(filepath: str):
+def create_and_save_images(filepath: str | Path):
     # Images per row, i.e. num to generate and num to classify
     NUM_IMAGES = 10
     AX_SIZE = 3
 
-    _mnist_loader = load_MNIST(
+    _dataset_loader = base_dataset_loader_method(
         batch_size=2 * NUM_IMAGES,
         num_samples=20 * NUM_IMAGES,
         train=False,
         shuffle=True,
     )
-    _joint_distribution_loader = OccludedImageLoader(
-        JointDistributionLoader(_mnist_loader), IMAGE_SHAPE
+    _occluded_image_loader = OccludedImageLoader(
+        JointDistributionLoader(_dataset_loader), IMAGE_SHAPE
     )
-    _data = next(iter(_joint_distribution_loader))
+    _data = next(iter(_occluded_image_loader))
     x0_samples = _data["x0_samples"].to(TORCH_DEVICE)
     x1_samples = _data["x1_samples"].to(TORCH_DEVICE)
     y0_samples = _data["y0_samples"].to(TORCH_DEVICE)
@@ -173,7 +206,6 @@ def create_and_save_images(filepath: str):
         figsize=(AX_SIZE * NUM_IMAGES, AX_SIZE * 4),
     )
 
-    C, H, W = IMAGE_SHAPE
     ax_row_indices = [
         *([0] * NUM_IMAGES),
         *([2] * NUM_IMAGES),
@@ -189,9 +221,15 @@ def create_and_save_images(filepath: str):
         top_ax.set_axis_off()
         bottom_ax.set_axis_off()
 
-        x0_image = x0_samples[image_index].cpu().clamp(0, 1).view((H, W, C))
+        x0_image = (
+            x0_samples[image_index].cpu().clamp(0, 1).view(IMAGE_SHAPE).permute(1, 2, 0)
+        )
         generated_image = (
-            pushforward_images[image_index].cpu().clamp(0, 1).view((H, W, C))
+            pushforward_images[image_index]
+            .cpu()
+            .clamp(0, 1)
+            .view(IMAGE_SHAPE)
+            .permute(1, 2, 0)
         )
         predicted_label = pushforward_classes[image_index]
         predicted_label_confidence = pushforward_class_confidence[
@@ -199,15 +237,15 @@ def create_and_save_images(filepath: str):
         ].item()
         true_label = pushforward_true_classes[image_index]
         top_ax.set_title(
-            f"Predicted Label: {predicted_label} ({predicted_label_confidence:.4f})\nTrue Label: {true_label}"
+            f"Predicted Label: {CLASS_LABELS[predicted_label]} ({predicted_label_confidence:.4f})\nTrue Label: {CLASS_LABELS[true_label]}"
         )
         top_ax.imshow(
             x0_image,
-            cmap="gray",
+            cmap="gray",  # Ignored for color images
         )
         bottom_ax.imshow(
             generated_image,
-            cmap="gray",
+            cmap="gray",  # Ignored for color images
         )
 
     fig.tight_layout()
@@ -355,20 +393,20 @@ for epoch_index in epoch_progress_bar:
     lr_scheduler.step()
     if epoch_index % EPOCH_SAVE_PERIOD == 0:
         with open(
-            f"models/experiment_01/augmentation_model.chk_{epoch_index:05d}", "wb"
+            MODELS_DIR.joinpath(f"augmentation_model.chk_{epoch_index:05d}"), "wb"
         ) as f:
             torch.save(velocity_field_model.state_dict(), f)
-        with open("models/experiment_01/history.csv", "w") as f:
+        with open(MODELS_DIR.joinpath("history.csv"), "w") as f:
             df = pd.DataFrame(history)
             df.to_csv(f, index=False)
     if epoch_index % EPOCH_GENERATE_PERIOD == 0:
         create_and_save_images(
-            f"figures/experiment_01/augmentation_{epoch_index:05d}.png"
+            FIGURES_DIR.joinpath(f"augmentation_{epoch_index:05d}.png")
         )
 
 
-with open("models/experiment_01/augmentation_model.model", "wb") as f:
+with open(MODELS_DIR.joinpath("augmentation_model.model"), "wb") as f:
     torch.save(velocity_field_model.state_dict(), f)
-with open("models/experiment_01/history.csv", "w") as f:
+with open(MODELS_DIR.joinpath("history.csv"), "w") as f:
     df = pd.DataFrame(history)
     df.to_csv(f, index=False)
