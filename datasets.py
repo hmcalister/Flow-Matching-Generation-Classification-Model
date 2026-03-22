@@ -34,7 +34,7 @@ class JointDistributionLoader(BaseDataLoader):
         for data in self.base_loader:
             x0_samples = data["p0_samples"]
             x1_samples = data["p1_samples"]
-            y1_samples = data["class_labels"]
+            y1_samples = data["class_logits"]
 
             batch_size, data_dimension = x0_samples.shape
             half_batch_size = batch_size // 2
@@ -122,7 +122,7 @@ def load_MNIST(
 
     :returns:
         A DataLoader yielding dict[str, torch.Tensor]
-        Dictionary keys are ["p0_samples", "p1_samples", "class_labels",]
+        Dictionary keys are ["p0_samples", "p1_samples", "class_logits",]
     """
 
     transform = transforms.Compose(
@@ -167,13 +167,13 @@ def load_MNIST(
         def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
             for images, image_labels in torch_loader:
                 prior_samples = torch.randn_like(images)
-                image_labels = torch.nn.functional.one_hot(
+                image_logits = torch.nn.functional.one_hot(
                     image_labels, num_classes=len(self.CLASS_LABELS)
                 ).float()
                 yield {
                     "p0_samples": prior_samples,
                     "p1_samples": images,
-                    "class_labels": image_labels,
+                    "class_logits": image_logits,
                 }
 
         def __len__(self) -> int:
@@ -200,7 +200,7 @@ def load_CIFAR10(
 
     :returns:
         A DataLoader yielding dict[str, torch.Tensor]
-        Dictionary keys are ["p0_samples", "p1_samples", "class_labels",]
+        Dictionary keys are ["p0_samples", "p1_samples", "class_logits",]
     """
 
     transform = transforms.Compose(
@@ -245,13 +245,13 @@ def load_CIFAR10(
         def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
             for images, image_labels in torch_loader:
                 prior_samples = torch.randn_like(images)
-                image_labels = torch.nn.functional.one_hot(
+                image_logits = torch.nn.functional.one_hot(
                     image_labels, num_classes=len(self.CLASS_LABELS)
                 ).float()
                 yield {
                     "p0_samples": prior_samples,
                     "p1_samples": images,
-                    "class_labels": image_labels,
+                    "class_logits": image_logits,
                 }
 
         def __len__(self) -> int:
