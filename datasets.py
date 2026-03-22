@@ -17,6 +17,12 @@ class BaseDataLoader:
         pass
 
 
+class BaseImageDataLoader(BaseDataLoader):
+    IMAGE_SHAPE: tuple[int, int, int]
+    DATA_DIMENSION: int
+    CLASS_LABELS: list[str]
+
+
 class JointDistributionLoader(BaseDataLoader):
     def __init__(self, base_loader: BaseDataLoader):
         self.base_loader = base_loader
@@ -104,7 +110,7 @@ def load_MNIST(
     preload: bool = False,
     train: bool = True,
     shuffle: bool = True,
-) -> BaseDataLoader:
+) -> BaseImageDataLoader:
     """
     Load, transform, and return the MNIST dataset as a DataLoader.
     MNIST has a shape (1, 28, 28).
@@ -134,22 +140,35 @@ def load_MNIST(
         dataset = torch.utils.data.Subset(dataset, range(num_samples))
 
     if preload:
-        loader = DataLoader(dataset, batch_size=num_samples, shuffle=False)
-        samples, labels = next(iter(loader))
+        _loader = DataLoader(dataset, batch_size=num_samples, shuffle=shuffle)
+        samples, labels = next(iter(_loader))
         dataset = torch.utils.data.TensorDataset(samples, labels)
 
     torch_loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
-    class MNISTDataLoader(BaseDataLoader):
+    class MNISTDataLoader(BaseImageDataLoader):
         IMAGE_SHAPE: tuple[int, int, int] = (1, 28, 28)
         DATA_DIMENSION = int(torch.prod(torch.tensor(IMAGE_SHAPE)).item())
         BATCH_SIZE = batch_size
+
+        CLASS_LABELS = [
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+        ]
 
         def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
             for images, image_labels in torch_loader:
                 prior_samples = torch.randn_like(images)
                 image_labels = torch.nn.functional.one_hot(
-                    image_labels, num_classes=10
+                    image_labels, num_classes=len(self.CLASS_LABELS)
                 ).float()
                 yield {
                     "p0_samples": prior_samples,
@@ -161,3 +180,5 @@ def load_MNIST(
             return len(torch_loader)
 
     return MNISTDataLoader()
+
+
