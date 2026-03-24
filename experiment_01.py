@@ -9,6 +9,7 @@ import torch
 from tqdm import tqdm
 
 from datasets import (
+    ClassCodeManager,
     JointDistributionLoader,
     OccludedImageLoader,
     load_CIFAR10,
@@ -20,11 +21,11 @@ TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DATASET = "CIFAR10"
 VELOCITY_MASK = True
 
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 FLOW_MATCHING_INITIAL_LEARNING_RATE = 1e-4
 FLOW_MATCHING_NUM_EPOCHS = 128
 
-ODE_NUM_TIME_STEPS = 16
+ODE_NUM_TIME_STEPS = 32
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
@@ -51,18 +52,29 @@ else:
     exit()
 
 _base_dataset_loader = base_dataset_loader_method(
-    batch_size=BATCH_SIZE, num_samples=BATCH_SIZE, preload=True, train=True
+    batch_size=BATCH_SIZE,
+    class_code_manager=ClassCodeManager(0, 0, TORCH_DEVICE),
+    num_samples=BATCH_SIZE,
+    preload=True,
+    train=True,
 )
 IMAGE_SHAPE: tuple[int, int, int] = _base_dataset_loader.IMAGE_SHAPE
+CHANNEL_SIZE = IMAGE_SHAPE[1] * IMAGE_SHAPE[2]
 IMAGE_DIMENSION = _base_dataset_loader.DATA_DIMENSION
 CLASS_LABELS = _base_dataset_loader.CLASS_LABELS
 NUM_CLASSES = len(_base_dataset_loader.CLASS_LABELS)
 del _base_dataset_loader
 
+CLASS_CODE_MANAGER = ClassCodeManager(NUM_CLASSES, CHANNEL_SIZE, TORCH_DEVICE)
+
 occluded_image_loader = OccludedImageLoader(
     JointDistributionLoader(
         base_dataset_loader_method(
-            batch_size=BATCH_SIZE, num_samples=50_000, preload=True, train=True
+            batch_size=BATCH_SIZE,
+            class_code_manager=CLASS_CODE_MANAGER,
+            num_samples=50_000,
+            preload=True,
+            train=True,
         )
     ),
     image_shape=IMAGE_SHAPE,
@@ -71,7 +83,11 @@ occluded_image_loader = OccludedImageLoader(
 occluded_image_validation_loader = OccludedImageLoader(
     JointDistributionLoader(
         base_dataset_loader_method(
-            batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=False
+            batch_size=BATCH_SIZE,
+            class_code_manager=CLASS_CODE_MANAGER,
+            num_samples=5_000,
+            preload=True,
+            train=False,
         )
     ),
     image_shape=IMAGE_SHAPE,
@@ -84,16 +100,16 @@ cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
 
 def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
-    # Shape (batch_size, IMAGE_DIMENSION + NUM_CLASSES)
+    # Shape (batch_size, (num_channels + 1) * CHANNEL_SIZE)
 
     image_component = mean_square_error_loss(
         x_pred[:, :IMAGE_DIMENSION], x_true[:, :IMAGE_DIMENSION]
     )
     label_component = mean_square_error_loss(
-        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES] / x_true.amax(),
-        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES] / x_true.amax(),
+        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
+        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
     )
-    loss = image_component + 0.01 * IMAGE_DIMENSION / NUM_CLASSES * label_component
+    loss = image_component + 5e-4 * label_component
     return loss
 
 
@@ -160,6 +176,7 @@ def create_and_save_images(filepath: str | Path):
 
     _dataset_loader = base_dataset_loader_method(
         batch_size=2 * NUM_IMAGES,
+        class_code_manager=CLASS_CODE_MANAGER,
         num_samples=20 * NUM_IMAGES,
         train=False,
         shuffle=True,
@@ -186,11 +203,14 @@ def create_and_save_images(filepath: str | Path):
         X = X + (1 / ODE_NUM_TIME_STEPS) * v
 
     pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
-    pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1)
-    pushforward_class_confidence = torch.nn.functional.softmax(
-        5 * X[:, IMAGE_DIMENSION:], dim=1
+    pushforward_class_channel = X[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE]
+    pushforward_class_distribution = CLASS_CODE_MANAGER.class_code_distribution(
+        pushforward_class_channel
     )
-    pushforward_true_classes = y1_samples.argmax(dim=1)
+    pushforward_classes = pushforward_class_distribution.argmax(dim=1)
+    pushforward_true_classes = CLASS_CODE_MANAGER.class_code_distribution(
+        y1_samples
+    ).argmax(dim=1)
 
     fig, axes = plt.subplots(
         nrows=4,
@@ -229,7 +249,7 @@ def create_and_save_images(filepath: str | Path):
         ].item()
         true_label = pushforward_true_classes[image_index]
         top_ax.set_title(
-            f"Predicted Label: {CLASS_LABELS[predicted_label]} ({predicted_label_confidence:.4f})\nTrue Label: {CLASS_LABELS[true_label]}"
+            f"Predicted Label: {CLASS_LABELS[predicted_label]} ({predicted_label_confidence:.3f})\nTrue Label: {CLASS_LABELS[true_label]}"
         )
         top_ax.imshow(
             x0_image,
@@ -254,7 +274,7 @@ optimizer = torch.optim.Adam(
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer,
     FLOW_MATCHING_NUM_EPOCHS,
-    eta_min=FLOW_MATCHING_INITIAL_LEARNING_RATE / 10,
+    eta_min=FLOW_MATCHING_INITIAL_LEARNING_RATE / 100,
 )
 
 epoch_progress_bar = tqdm(
@@ -359,21 +379,16 @@ for epoch_index in epoch_progress_bar:
             batch_loss /= ODE_NUM_TIME_STEPS
 
             pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
-            pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1).float()
-            pushforward_class_confidence = torch.nn.functional.softmax(
-                5 * X[:, IMAGE_DIMENSION:], dim=1
+            pushforward_class_channel = X[
+                :, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE
+            ]
+            pushforward_class_distribution = CLASS_CODE_MANAGER.class_code_distribution(
+                pushforward_class_channel
             )
-            pushforward_true_classes = y1_samples.argmax(dim=1).float()
-
-            epoch_validation_loss += batch_loss
-            epoch_validation_accuracy += (
-                (pushforward_classes == pushforward_true_classes)
-                .type(torch.float)
-                .mean()
-            )
-            epoch_validation_cross_entropy += cross_entropy_loss(
-                pushforward_class_confidence, y1_samples
-            )
+            pushforward_classes = pushforward_class_distribution.amax(dim=1)
+            pushforward_true_classes = CLASS_CODE_MANAGER.class_code_distribution(
+                y1_samples
+            ).argmax(dim=1)
 
         num_items = len(occluded_image_validation_loader)
         history["validation_loss"].append(epoch_validation_loss.item() / num_items)
