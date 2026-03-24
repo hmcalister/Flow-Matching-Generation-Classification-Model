@@ -1,6 +1,8 @@
+import warnings
 from abc import abstractmethod
 from typing import Iterator
 
+import numpy as np
 import torch
 import torchvision
 from torch.utils.data import DataLoader
@@ -211,9 +213,14 @@ def load_CIFAR10(
             transforms.Lambda(lambda x: x.flatten()),
         ]
     )
-    dataset = torchvision.datasets.CIFAR10(
-        "datasets/CIFAR10", download=True, transform=transform, train=train
-    )
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=np.exceptions.VisibleDeprecationWarning
+        )
+        dataset = torchvision.datasets.CIFAR10(
+            "datasets/CIFAR10", download=True, transform=transform, train=train
+        )
     if num_samples < len(dataset):
         dataset = torch.utils.data.Subset(dataset, range(num_samples))
 
