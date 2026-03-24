@@ -390,6 +390,15 @@ for epoch_index in epoch_progress_bar:
                 y1_samples
             ).argmax(dim=1)
 
+            epoch_validation_loss += batch_loss
+            epoch_validation_accuracy += (
+                (pushforward_classes == pushforward_true_classes).float().mean()
+            )
+            epoch_validation_cross_entropy += cross_entropy_loss(
+                pushforward_class_distribution,
+                pushforward_true_classes.long(),
+            )
+
         num_items = len(occluded_image_validation_loader)
         history["validation_loss"].append(epoch_validation_loss.item() / num_items)
         history["validation_classification_accuracy"].append(

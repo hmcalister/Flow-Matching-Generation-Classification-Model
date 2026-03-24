@@ -98,7 +98,7 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
         x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
         x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
     )
-    loss = image_component + 5e-4 * label_component
+    loss = image_component + 5e-1 * label_component
     return loss
 
 
@@ -363,7 +363,7 @@ for epoch_index in epoch_progress_bar:
                 (pushforward_classes == pushforward_true_classes).float().mean()
             )
             epoch_validation_cross_entropy += cross_entropy_loss(
-                SOFTMAX_PREFACTOR * X[:, IMAGE_DIMENSION:],
+                pushforward_class_distribution,
                 pushforward_true_classes.long(),
             )
 
