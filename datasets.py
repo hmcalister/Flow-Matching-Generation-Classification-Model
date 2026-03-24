@@ -14,10 +14,13 @@ _RANDOM_STANDARD_DEVIATION = 1.0
 class ClassCodeManager:
     CLASS_CODES: torch.Tensor
 
-    def __init__(self, num_classes: int, channel_size: int):
+    def __init__(self, num_classes: int, channel_size: int, torch_device: str):
         self.num_classes = num_classes
         self.channel_size = channel_size
-        self.CLASS_CODES = (torch.rand((num_classes, channel_size)) < 0.5).float()
+        self.torch_device = torch_device
+        self.CLASS_CODES = (
+            torch.rand((num_classes, channel_size), device=torch_device) < 0.5
+        ).float()
 
     def class_code_distances(self, prediction: torch.Tensor) -> torch.Tensor:
         """
