@@ -22,7 +22,6 @@ FLOW_MATCHING_NUM_EPOCHS = 128
 ODE_NUM_TIME_STEPS = 16
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
-SOFTMAX_PREFACTOR = 10
 
 ENABLE_PROGRESS_BAR = True
 
@@ -48,7 +47,7 @@ else:
 
 _base_dataset_loader = base_dataset_loader_method(
     batch_size=BATCH_SIZE,
-    class_code_manager=ClassCodeManager(0, 0),
+    class_code_manager=ClassCodeManager(0, 0, TORCH_DEVICE),
     num_samples=BATCH_SIZE,
     preload=True,
     train=True,
@@ -60,7 +59,7 @@ CLASS_LABELS = _base_dataset_loader.CLASS_LABELS
 NUM_CLASSES = len(_base_dataset_loader.CLASS_LABELS)
 del _base_dataset_loader
 
-CLASS_CODE_MANAGER = ClassCodeManager(NUM_CLASSES, CHANNEL_SIZE)
+CLASS_CODE_MANAGER = ClassCodeManager(NUM_CLASSES, CHANNEL_SIZE, TORCH_DEVICE)
 
 joint_distribution_loader = JointDistributionLoader(
     base_dataset_loader_method(
@@ -195,8 +194,10 @@ def create_and_save_images(filepath: str | Path):
     pushforward_class_distribution = CLASS_CODE_MANAGER.class_code_distribution(
         pushforward_class_channel
     )
-    pushforward_classes = pushforward_class_distribution.amax(dim=1)
-    pushforward_true_classes = y1_samples.argmax(dim=1)
+    pushforward_classes = pushforward_class_distribution.argmax(dim=1)
+    pushforward_true_classes = CLASS_CODE_MANAGER.class_code_distribution(
+        y1_samples
+    ).argmax(dim=1)
 
     fig, axes = plt.subplots(
         nrows=2,
@@ -353,7 +354,9 @@ for epoch_index in epoch_progress_bar:
                 pushforward_class_channel
             )
             pushforward_classes = pushforward_class_distribution.amax(dim=1)
-            pushforward_true_classes = y1_samples.argmax(dim=1)
+            pushforward_true_classes = CLASS_CODE_MANAGER.class_code_distribution(
+                y1_samples
+            ).argmax(dim=1)
 
             epoch_validation_loss += batch_loss
             epoch_validation_accuracy += (
