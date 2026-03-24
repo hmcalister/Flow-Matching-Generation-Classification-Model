@@ -8,6 +8,7 @@ import torchvision
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2 as transforms
 
+_RANDOM_STANDARD_DEVIATION = 1.0
 
 class BaseDataLoader:
     @abstractmethod
@@ -44,7 +45,7 @@ class JointDistributionLoader(BaseDataLoader):
             # First half of batch is (noise, label) -> (image, label)
             # Second half of batch is (image, noise) -> (image, label)
             x0_samples[half_batch_size:, :] = x1_samples[half_batch_size:]
-            y0_samples = torch.randn_like(y1_samples)
+            y0_samples = _RANDOM_STANDARD_DEVIATION * torch.randn_like(y1_samples)
             y0_samples[:half_batch_size, :] = y1_samples[:half_batch_size]
 
             data = {}
@@ -251,10 +252,7 @@ def load_CIFAR10(
 
         def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
             for images, image_labels in torch_loader:
-                prior_samples = torch.randn_like(images)
-                image_logits = torch.nn.functional.one_hot(
-                    image_labels, num_classes=len(self.CLASS_LABELS)
-                ).float()
+                prior_samples = _RANDOM_STANDARD_DEVIATION * torch.randn_like(images)
                 yield {
                     "p0_samples": prior_samples,
                     "p1_samples": images,
