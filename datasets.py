@@ -237,8 +237,8 @@ def load_CIFAR10(
         BATCH_SIZE = batch_size
 
         CLASS_LABELS = [
-            "AIRPLANE",
-            "AUTOMOBILE",
+            "PLANE",
+            "CAR",
             "BIRD",
             "CAT",
             "DEER",
