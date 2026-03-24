@@ -8,12 +8,12 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from datasets import JointDistributionLoader, load_CIFAR10, load_MNIST
+from datasets import ClassCodeManager, JointDistributionLoader, load_CIFAR10, load_MNIST
 from velocity_field_model import MetaUNetModel
 
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DATASET = "CIFAR10"
-VELOCITY_MASK = False
+DATASET = "MNIST"
+VELOCITY_MASK = True
 
 BATCH_SIZE = 128
 FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-4
@@ -22,6 +22,7 @@ FLOW_MATCHING_NUM_EPOCHS = 128
 ODE_NUM_TIME_STEPS = 16
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
+SOFTMAX_PREFACTOR = 10
 
 ENABLE_PROGRESS_BAR = True
 
@@ -46,23 +47,38 @@ else:
     exit()
 
 _base_dataset_loader = base_dataset_loader_method(
-    batch_size=BATCH_SIZE, num_samples=BATCH_SIZE, preload=True, train=True
+    batch_size=BATCH_SIZE,
+    class_code_manager=ClassCodeManager(0, 0),
+    num_samples=BATCH_SIZE,
+    preload=True,
+    train=True,
 )
 IMAGE_SHAPE: tuple[int, int, int] = _base_dataset_loader.IMAGE_SHAPE
+CHANNEL_SIZE = IMAGE_SHAPE[1] * IMAGE_SHAPE[2]
 IMAGE_DIMENSION = _base_dataset_loader.DATA_DIMENSION
 CLASS_LABELS = _base_dataset_loader.CLASS_LABELS
 NUM_CLASSES = len(_base_dataset_loader.CLASS_LABELS)
 del _base_dataset_loader
 
+CLASS_CODE_MANAGER = ClassCodeManager(NUM_CLASSES, CHANNEL_SIZE)
+
 joint_distribution_loader = JointDistributionLoader(
     base_dataset_loader_method(
-        batch_size=BATCH_SIZE, num_samples=50_000, preload=True, train=True
+        batch_size=BATCH_SIZE,
+        class_code_manager=CLASS_CODE_MANAGER,
+        num_samples=50_000,
+        preload=True,
+        train=True,
     )
 )
 
 joint_distribution_validation_loader = JointDistributionLoader(
     base_dataset_loader_method(
-        batch_size=BATCH_SIZE, num_samples=5_000, preload=True, train=False
+        batch_size=BATCH_SIZE,
+        class_code_manager=CLASS_CODE_MANAGER,
+        num_samples=5_000,
+        preload=True,
+        train=False,
     )
 )
 
@@ -74,16 +90,16 @@ cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
 
 def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
-    # Shape (batch_size, IMAGE_DIMENSION + NUM_CLASSES)
+    # Shape (batch_size, (num_channels + 1) * CHANNEL_SIZE)
 
     image_component = mean_square_error_loss(
         x_pred[:, :IMAGE_DIMENSION], x_true[:, :IMAGE_DIMENSION]
     )
     label_component = mean_square_error_loss(
-        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES] / x_true.amax(),
-        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES] / x_true.amax(),
+        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
+        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
     )
-    loss = image_component + 0.01 * IMAGE_DIMENSION / NUM_CLASSES * label_component
+    loss = image_component + 5e-4 * label_component
     return loss
 
 
@@ -91,12 +107,14 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
 
 
 class VelocityFieldModel(torch.nn.Module):
-    NUM_CHANNELS = IMAGE_SHAPE[0] + NUM_CLASSES
+    NUM_CHANNELS = IMAGE_SHAPE[0] + 1
     EMBEDDING_DIMENSIONS = (256,)
     MODEL_BASE_CHANNELS = 64
     NUM_RES_BLOCKS = 2
-    ATTENTION_RESOLUTIONS: tuple[int, ...] = (2, 4)
-    CHANNEL_MULT: tuple[int, ...] = (1, 2, 2, 4)
+    ATTENTION_RESOLUTIONS: tuple[int, ...] = (1,)
+    CHANNEL_MULT: tuple[int, ...] = (1, 2, 4)
+    # ATTENTION_RESOLUTIONS: tuple[int, ...] = (2, 4)
+    # CHANNEL_MULT: tuple[int, ...] = (1, 2, 2, 4)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -114,23 +132,21 @@ class VelocityFieldModel(torch.nn.Module):
         self.network.to(TORCH_DEVICE)
 
     def forward(self, t: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
-        # Accepts and returns a tensor of shape (batch_size, IMAGE_DIMENSION + NUM_CLASSES)
+        # Accepts and returns a tensor of shape (batch_size, IMAGE_DIMENSION)
         # First part is image data, second part is distribution over class labels
 
         image_data = X[:, :IMAGE_DIMENSION]
-        class_data = X[:, IMAGE_DIMENSION : IMAGE_DIMENSION + NUM_CLASSES]
+        class_data = X[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE]
 
-        image_channel = image_data.view(-1, *IMAGE_SHAPE)
-        class_channels = class_data.view(-1, NUM_CLASSES, 1, 1).repeat(
-            1, 1, *IMAGE_SHAPE[1:]
-        )
+        image_channels = image_data.view(-1, *IMAGE_SHAPE)
+        class_channels = class_data.view(-1, 1, IMAGE_SHAPE[1], IMAGE_SHAPE[2])
 
-        # Shape (batch_size, 1+NUM_CLASSES, IMAGE_WIDTH, IMAGE_HEIGHT)
-        X = torch.cat([image_channel, class_channels], dim=1)
+        # Shape (batch_size, (num_channels + 1) * CHANNEL_SIZE, IMAGE_WIDTH, IMAGE_HEIGHT)
+        X = torch.cat([image_channels, class_channels], dim=1)
         v = self.network((t,), X)
 
         image_v = v[:, : IMAGE_SHAPE[0], :, :].view(-1, IMAGE_DIMENSION)
-        class_v = v[:, IMAGE_SHAPE[0] :, :, :].mean(dim=(2, 3))
+        class_v = v[:, IMAGE_SHAPE[0] : IMAGE_SHAPE[0] + 1, :, :].view(-1, CHANNEL_SIZE)
         v = torch.cat([image_v, class_v], dim=1)
 
         return v
@@ -150,6 +166,7 @@ def create_and_save_images(filepath: str | Path):
 
     _dataset_loader = base_dataset_loader_method(
         batch_size=2 * NUM_IMAGES,
+        class_code_manager=CLASS_CODE_MANAGER,
         num_samples=20 * NUM_IMAGES,
         train=False,
         shuffle=True,
@@ -174,10 +191,11 @@ def create_and_save_images(filepath: str | Path):
         X = X + (1 / ODE_NUM_TIME_STEPS) * v
 
     pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
-    pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1)
-    pushforward_class_confidence = torch.nn.functional.softmax(
-        5 * X[:, IMAGE_DIMENSION:], dim=1
+    pushforward_class_channel = X[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE]
+    pushforward_class_distribution = CLASS_CODE_MANAGER.class_code_distribution(
+        pushforward_class_channel
     )
+    pushforward_classes = pushforward_class_distribution.amax(dim=1)
     pushforward_true_classes = y1_samples.argmax(dim=1)
 
     fig, axes = plt.subplots(
@@ -197,12 +215,12 @@ def create_and_save_images(filepath: str | Path):
             .permute(1, 2, 0)
         )
         predicted_label = pushforward_classes[image_index]
-        predicted_label_confidence = pushforward_class_confidence[
+        predicted_label_confidence = pushforward_class_distribution[
             image_index, predicted_label
         ].item()
         true_label = pushforward_true_classes[image_index]
         ax.set_title(
-            f"Predicted Label: {CLASS_LABELS[predicted_label]} ({predicted_label_confidence:.4f})\nTrue Label: {CLASS_LABELS[true_label]}"
+            f"Predicted Label: {CLASS_LABELS[predicted_label]} ({predicted_label_confidence:.3f})\nTrue Label: {CLASS_LABELS[true_label]}"
         )
         ax.imshow(
             generated_image,
@@ -223,7 +241,7 @@ optimizer = torch.optim.Adam(
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer,
     FLOW_MATCHING_NUM_EPOCHS,
-    eta_min=FLOW_MATCHING_INITIAL_LEARNING_RATE / 10,
+    eta_min=FLOW_MATCHING_INITIAL_LEARNING_RATE / 100,
 )
 
 epoch_progress_bar = tqdm(
@@ -328,20 +346,22 @@ for epoch_index in epoch_progress_bar:
             batch_loss /= ODE_NUM_TIME_STEPS
 
             pushforward_images = X[:, :IMAGE_DIMENSION].view((-1, *IMAGE_SHAPE))
-            pushforward_classes = X[:, IMAGE_DIMENSION:].argmax(dim=1).float()
-            pushforward_class_confidence = torch.nn.functional.softmax(
-                5 * X[:, IMAGE_DIMENSION:], dim=1
+            pushforward_class_channel = X[
+                :, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE
+            ]
+            pushforward_class_distribution = CLASS_CODE_MANAGER.class_code_distribution(
+                pushforward_class_channel
             )
-            pushforward_true_classes = y1_samples.argmax(dim=1).float()
+            pushforward_classes = pushforward_class_distribution.amax(dim=1)
+            pushforward_true_classes = y1_samples.argmax(dim=1)
 
             epoch_validation_loss += batch_loss
             epoch_validation_accuracy += (
-                (pushforward_classes == pushforward_true_classes)
-                .type(torch.float)
-                .mean()
+                (pushforward_classes == pushforward_true_classes).float().mean()
             )
             epoch_validation_cross_entropy += cross_entropy_loss(
-                pushforward_class_confidence, y1_samples
+                SOFTMAX_PREFACTOR * X[:, IMAGE_DIMENSION:],
+                pushforward_true_classes.long(),
             )
 
         num_items = len(joint_distribution_validation_loader)
