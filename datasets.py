@@ -10,6 +10,35 @@ from torchvision.transforms import v2 as transforms
 
 _RANDOM_STANDARD_DEVIATION = 1.0
 
+
+class ClassCodeManager:
+    CLASS_CODES: torch.Tensor
+
+    def __init__(self, num_classes: int, channel_size: int):
+        self.num_classes = num_classes
+        self.channel_size = channel_size
+        self.CLASS_CODES = (torch.rand((num_classes, channel_size)) < 0.5).float()
+
+    def class_code_distances(self, prediction: torch.Tensor) -> torch.Tensor:
+        """
+        Accepts class prediction of shape (batch_size, image_width*image_height) and returns
+        (batch_size, num_classes) for a tensor of square distances to each class code.
+        """
+
+        return (
+            (self.CLASS_CODES[None, :, :] - prediction[:, None, :]).square().sum(dim=2)
+        )
+
+    def class_code_distribution(self, prediction: torch.Tensor) -> torch.Tensor:
+        """
+        Accepts class prediction of shape (batch_size, image_width*image_height) and returns
+        (batch_size, num_classes) for a tensor of the softmax distribution over class codes.
+        """
+
+        distances = self.class_code_distances(prediction)
+        return torch.nn.functional.softmin(distances, dim=1)
+
+
 class BaseDataLoader:
     @abstractmethod
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
@@ -37,7 +66,7 @@ class JointDistributionLoader(BaseDataLoader):
         for data in self.base_loader:
             x0_samples = data["p0_samples"]
             x1_samples = data["p1_samples"]
-            y1_samples = data["class_logits"]
+            y1_samples = data["class_labels"]
 
             batch_size, data_dimension = x0_samples.shape
             half_batch_size = batch_size // 2
@@ -87,9 +116,6 @@ class OccludedImageLoader:
             image_to_image_mask = (x0_samples == x1_samples).all(dim=1)
             image_to_image_images = x0_samples[image_to_image_mask]
 
-            # occluded_images = self.random_erasing(
-            #     image_to_image_images.view(-1, *self.image_shape)
-            # ).view(image_to_image_images.shape[0], -1)
             occluded_list = [
                 self.random_erasing(img.view(*self.image_shape))
                 for img in image_to_image_images
@@ -109,6 +135,7 @@ class OccludedImageLoader:
 
 def load_MNIST(
     batch_size: int,
+    class_code_manager: ClassCodeManager,
     num_samples: int = 60_000,
     preload: bool = False,
     train: bool = True,
@@ -125,7 +152,7 @@ def load_MNIST(
 
     :returns:
         A DataLoader yielding dict[str, torch.Tensor]
-        Dictionary keys are ["p0_samples", "p1_samples", "class_logits",]
+        Dictionary keys are ["p0_samples", "p1_samples", "class_labels",]
     """
 
     transform = transforms.Compose(
@@ -167,16 +194,16 @@ def load_MNIST(
             "9",
         ]
 
+        CLASS_CODE_MANAGER = class_code_manager
+
         def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
             for images, image_labels in torch_loader:
-                prior_samples = torch.randn_like(images)
-                image_logits = torch.nn.functional.one_hot(
-                    image_labels, num_classes=len(self.CLASS_LABELS)
-                ).float()
+                prior_samples = _RANDOM_STANDARD_DEVIATION * torch.randn_like(images)
+                image_labels = self.CLASS_CODE_MANAGER.CLASS_CODES[image_labels]
                 yield {
                     "p0_samples": prior_samples,
                     "p1_samples": images,
-                    "class_logits": image_logits,
+                    "class_labels": image_labels,
                 }
 
         def __len__(self) -> int:
@@ -187,6 +214,7 @@ def load_MNIST(
 
 def load_CIFAR10(
     batch_size: int,
+    class_code_manager: ClassCodeManager,
     num_samples: int = 50_000,
     preload: bool = False,
     train: bool = True,
@@ -203,7 +231,7 @@ def load_CIFAR10(
 
     :returns:
         A DataLoader yielding dict[str, torch.Tensor]
-        Dictionary keys are ["p0_samples", "p1_samples", "class_logits",]
+        Dictionary keys are ["p0_samples", "p1_samples", "class_labels",]
     """
 
     transform = transforms.Compose(
@@ -250,13 +278,16 @@ def load_CIFAR10(
             "TRUCK",
         ]
 
+        CLASS_CODE_MANAGER = class_code_manager
+
         def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
             for images, image_labels in torch_loader:
                 prior_samples = _RANDOM_STANDARD_DEVIATION * torch.randn_like(images)
+                image_labels = self.CLASS_CODE_MANAGER.CLASS_CODES[image_labels]
                 yield {
                     "p0_samples": prior_samples,
                     "p1_samples": images,
-                    "class_logits": image_logits,
+                    "class_labels": image_labels,
                 }
 
         def __len__(self) -> int:
