@@ -1,4 +1,5 @@
 import os
+import pickle
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -12,14 +13,15 @@ from datasets import ClassCodeManager, JointDistributionLoader, load_CIFAR10, lo
 from velocity_field_model import MetaUNetModel
 
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DATASET = "MNIST"
+DATASET = "CIFAR10"
+CLASS_CODE_SIZE = 4
 VELOCITY_MASK = True
 
 BATCH_SIZE = 128
-FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-4
+FLOW_MATCHING_INITIAL_LEARNING_RATE = 5e-5
 FLOW_MATCHING_NUM_EPOCHS = 128
 
-ODE_NUM_TIME_STEPS = 16
+ODE_NUM_TIME_STEPS = 32
 EPOCH_SAVE_PERIOD = 4
 EPOCH_GENERATE_PERIOD = 1
 
@@ -47,7 +49,7 @@ else:
 
 _base_dataset_loader = base_dataset_loader_method(
     batch_size=BATCH_SIZE,
-    class_code_manager=ClassCodeManager(0, 0, TORCH_DEVICE),
+    class_code_manager=None,
     num_samples=BATCH_SIZE,
     preload=True,
     train=True,
@@ -59,7 +61,11 @@ CLASS_LABELS = _base_dataset_loader.CLASS_LABELS
 NUM_CLASSES = len(_base_dataset_loader.CLASS_LABELS)
 del _base_dataset_loader
 
-CLASS_CODE_MANAGER = ClassCodeManager(NUM_CLASSES, CHANNEL_SIZE, TORCH_DEVICE)
+CLASS_CODE_MANAGER = ClassCodeManager(
+    NUM_CLASSES, IMAGE_SHAPE[1], IMAGE_SHAPE[2], CLASS_CODE_SIZE, TORCH_DEVICE
+)
+with open(MODELS_DIR.joinpath("class_code_manager.pkl"), "wb") as f:
+    pickle.dump(CLASS_CODE_MANAGER, f)
 
 joint_distribution_loader = JointDistributionLoader(
     base_dataset_loader_method(
@@ -75,7 +81,7 @@ joint_distribution_validation_loader = JointDistributionLoader(
     base_dataset_loader_method(
         batch_size=BATCH_SIZE,
         class_code_manager=CLASS_CODE_MANAGER,
-        num_samples=5_000,
+        num_samples=1_000,
         preload=True,
         train=False,
     )
@@ -95,10 +101,10 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
         x_pred[:, :IMAGE_DIMENSION], x_true[:, :IMAGE_DIMENSION]
     )
     label_component = mean_square_error_loss(
-        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
-        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE] / x_true.amax(),
+        x_pred[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE],
+        x_true[:, IMAGE_DIMENSION : IMAGE_DIMENSION + CHANNEL_SIZE],
     )
-    loss = image_component + 5e-1 * label_component
+    loss = image_component + 5e2 * label_component
     return loss
 
 
@@ -108,12 +114,12 @@ def loss_fn(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
 class VelocityFieldModel(torch.nn.Module):
     NUM_CHANNELS = IMAGE_SHAPE[0] + 1
     EMBEDDING_DIMENSIONS = (256,)
-    MODEL_BASE_CHANNELS = 64
+    MODEL_BASE_CHANNELS = 128
     NUM_RES_BLOCKS = 2
-    ATTENTION_RESOLUTIONS: tuple[int, ...] = (1,)
-    CHANNEL_MULT: tuple[int, ...] = (1, 2, 4)
-    # ATTENTION_RESOLUTIONS: tuple[int, ...] = (2, 4)
-    # CHANNEL_MULT: tuple[int, ...] = (1, 2, 2, 4)
+    # ATTENTION_RESOLUTIONS: tuple[int, ...] = (1,)
+    # CHANNEL_MULT: tuple[int, ...] = (1, 2, 4)
+    ATTENTION_RESOLUTIONS: tuple[int, ...] = (2, 4)
+    CHANNEL_MULT: tuple[int, ...] = (1, 2, 2, 4)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -152,7 +158,7 @@ class VelocityFieldModel(torch.nn.Module):
 
 
 velocity_field_model = VelocityFieldModel()
-torch.compile(velocity_field_model)
+# velocity_field_model.compile()
 
 # --------------------------------------------------------------------------------
 
@@ -184,7 +190,7 @@ def create_and_save_images(filepath: str | Path):
         velocity_mask = torch.ones_like(velocity_mask)
     t_steps = torch.linspace(0, 1, ODE_NUM_TIME_STEPS).to(TORCH_DEVICE)
 
-    for index in range(ODE_NUM_TIME_STEPS):
+    for index in range(ODE_NUM_TIME_STEPS - 1):
         t = t_steps[index] * torch.ones((2 * NUM_IMAGES,), device=TORCH_DEVICE)
         v = velocity_field_model.forward(t, X) * velocity_mask
         X = X + (1 / ODE_NUM_TIME_STEPS) * v
@@ -238,6 +244,7 @@ def create_and_save_images(filepath: str | Path):
 optimizer = torch.optim.Adam(
     velocity_field_model.parameters(),
     FLOW_MATCHING_INITIAL_LEARNING_RATE,
+    betas=(0.9, 0.95),
 )
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer,
@@ -330,13 +337,13 @@ for epoch_index in epoch_progress_bar:
             if not VELOCITY_MASK:
                 velocity_mask = torch.ones_like(velocity_mask)
 
-            expected_velocity = X1 - X0
+            expected_velocity = (X1 - X0) * velocity_mask
 
             X = X0
             effective_batch_size = X.shape[0]
             t_steps = torch.linspace(0, 1, ODE_NUM_TIME_STEPS).to(TORCH_DEVICE)
             batch_loss = torch.zeros(1, device=TORCH_DEVICE)
-            for index in range(ODE_NUM_TIME_STEPS):
+            for index in range(ODE_NUM_TIME_STEPS - 1):
                 t = t_steps[index] * torch.ones(
                     (effective_batch_size,), device=TORCH_DEVICE
                 )
@@ -353,7 +360,7 @@ for epoch_index in epoch_progress_bar:
             pushforward_class_distribution = CLASS_CODE_MANAGER.class_code_distribution(
                 pushforward_class_channel
             )
-            pushforward_classes = pushforward_class_distribution.amax(dim=1)
+            pushforward_classes = pushforward_class_distribution.argmax(dim=1)
             pushforward_true_classes = CLASS_CODE_MANAGER.class_code_distribution(
                 y1_samples
             ).argmax(dim=1)
