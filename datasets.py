@@ -8,34 +8,89 @@ import torchvision
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2 as transforms
 
-_RANDOM_STANDARD_DEVIATION = 1.0
+_RANDOM_STANDARD_DEVIATION = 0.1
 
 
 class ClassCodeManager:
     CLASS_CODES: torch.Tensor
 
-    def __init__(self, num_classes: int, channel_size: int, torch_device: str):
+    def __init__(
+        self,
+        num_classes: int,
+        channel_height: int,
+        channel_width: int,
+        code_size: int | None,
+        torch_device: str,
+    ):
+        """
+        Manages random binary class codes embedded as a centered square patch
+        within a (channel_height x channel_width) channel.
+
+        :param num_classes: Number of classes.
+        :param channel_height: Height of the class channel (e.g. IMAGE_SHAPE[1]).
+        :param channel_width: Width of the class channel (e.g. IMAGE_SHAPE[2]).
+        :param code_size: Side length of the centered square patch used for the
+            class code. The active region is (code_size x code_size) pixels.
+            Distances and classification are computed only over this patch.
+            Defaults to min(channel_height, channel_width).
+        :param torch_device: Torch device string.
+        """
         self.num_classes = num_classes
-        self.channel_size = channel_size
+        self.channel_height = channel_height
+        self.channel_width = channel_width
+        self.channel_size = channel_height * channel_width
         self.torch_device = torch_device
-        self.CLASS_CODES = (
-            torch.rand((num_classes, channel_size), device=torch_device) < 0.5
-        ).float()
+
+        # code_size is the side length of the centered square patch
+        self.code_size = (
+            code_size if code_size is not None else min(channel_height, channel_width)
+        )
+        assert self.code_size <= channel_height and self.code_size <= channel_width, (
+            "code_size must be <= channel_height and channel_width"
+        )
+
+        # Build a 2D boolean mask for the centered code_size x code_size patch
+        row_start = (channel_height - self.code_size) // 2
+        col_start = (channel_width - self.code_size) // 2
+        mask_2d = torch.zeros(channel_height, channel_width, dtype=torch.bool)
+        mask_2d[
+            row_start : row_start + self.code_size,
+            col_start : col_start + self.code_size,
+        ] = True
+        self._patch_mask = mask_2d.flatten().to(torch_device)
+
+        # Compact binary codes of shape (num_classes, code_size*code_size)
+        self._CLASS_CODE_CENTERS = (
+            torch.randn(
+                (num_classes, self.code_size * self.code_size), device=torch_device
+            )
+            .sign()
+            .float()
+        )
+
+        # Full-channel embeddings: zeros except in the active center patch
+        self.CLASS_CODES = torch.zeros(
+            (num_classes, self.channel_size), device=torch_device
+        )
+        self.CLASS_CODES[:, self._patch_mask] = self._CLASS_CODE_CENTERS
 
     def class_code_distances(self, prediction: torch.Tensor) -> torch.Tensor:
         """
-        Accepts class prediction of shape (batch_size, image_width*image_height) and returns
-        (batch_size, num_classes) for a tensor of square distances to each class code.
+        Accepts class prediction of shape (batch_size, channel_size) and returns
+        (batch_size, num_classes) squared distances computed only over the active
+        center patch.
         """
-
+        active = prediction[:, self._patch_mask]
         return (
-            (self.CLASS_CODES[None, :, :] - prediction[:, None, :]).square().sum(dim=2)
+            (self._CLASS_CODE_CENTERS[None, :, :] - active[:, None, :])
+            .square()
+            .sum(dim=2)
         )
 
     def class_code_distribution(self, prediction: torch.Tensor) -> torch.Tensor:
         """
-        Accepts class prediction of shape (batch_size, image_width*image_height) and returns
-        (batch_size, num_classes) for a tensor of the softmax distribution over class codes.
+        Accepts class prediction of shape (batch_size, channel_size) and returns
+        (batch_size, num_classes) softmin distribution over class codes.
         """
 
         distances = self.class_code_distances(prediction)
